@@ -19,6 +19,7 @@
 //!
 //! `inline_tweak` provides a `watch!()` macro that sleeps until the file is modified, akin to a breakpoint:
 //! ```rust
+//! use inline_tweak::watch;
 //! loop {
 //!     println!("{}", inline_tweak::tweak!(3.14));
 //!     watch!(); // The thread will sleep here until anything in the file changes
@@ -30,11 +31,13 @@
 //! `inline_tweak` allows to tweak expressions by providing a value later.
 //! For example:
 //! ```rust
+//! use inline_tweak::tweak;
 //! tweak!(rng.gen_range(0.0, 1.0))
 //! ```
 //!
 //! can then be replaced by a constant value by modifying the file (even while the application is running) to
 //! ```rust
+//! use inline_tweak::tweak;
 //! tweak!(5.0; rng.gen_range(0.0, 1.0)) // will always return 5.0
 //! ```
 //!
@@ -50,13 +53,14 @@ pub trait Tweakable: Sized {
 #[cfg(any(debug_assertions, feature = "release_tweak"))]
 mod itweak {
     use super::Tweakable;
-    use lazy_static::*;
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
     use std::fs::File;
     use std::io::{BufRead, BufReader};
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::time::{Instant, SystemTime};
+    use once_cell::sync::Lazy;
 
     macro_rules! impl_tweakable {
         ($($t: ty) +) => {
@@ -93,30 +97,51 @@ mod itweak {
         file_modified: SystemTime,
     }
 
-    lazy_static! {
-        static ref VALUES: Mutex<HashMap<(&'static str, u32, u32), TweakValue>> =
-            Default::default();
-        static ref PARSED_FILES: Mutex<HashSet<&'static str>> = Default::default();
-        static ref WATCHERS: Mutex<HashMap<&'static str, FileWatcher>> = Default::default();
-    }
+    // lazy_static! {
+    //     static ref VALUES: Mutex<HashMap<(&'static str, u32, u32), TweakValue>> =
+    //         Default::default();
+    //     static ref PARSED_FILES: Mutex<HashSet<&'static str>> = Default::default();
+    //     static ref WATCHERS: Mutex<HashMap<&'static str, FileWatcher>> = Default::default();
+    // }
 
-    fn last_modified(file: &'static str) -> Option<SystemTime> {
-        File::open(file).ok()?.metadata().ok()?.modified().ok()
+    static VALUES: Lazy<Mutex<HashMap<(&'static str, u32, u32), TweakValue>>> = Lazy::new(|| {
+        Default::default()
+    });
+    static PARSED_FILES: Lazy<Mutex<HashSet<&'static str>>> = Lazy::new(|| {
+        Default::default()
+    });
+    static WATCHERS: Lazy<Mutex<HashMap<&'static str, FileWatcher>>> = Lazy::new(|| {
+        Default::default()
+    });
+    static CARGO_PROJECT_ROOT: Lazy<PathBuf> = Lazy::new(|| {
+        let output = std::process::Command::new(env!("CARGO"))
+            .arg("locate-project")
+            .arg("--workspace")
+            .arg("--message-format=plain")
+            .output()
+            .unwrap()
+            .stdout;
+        let cargo_path = Path::new(std::str::from_utf8(&output).unwrap().trim());
+        cargo_path.parent().unwrap().to_path_buf()
+    });
+
+    fn last_modified(file_path: &PathBuf) -> Option<SystemTime> {
+        File::open(file_path).ok()?.metadata().ok()?.modified().ok()
     }
 
     // Assume that the first time a tweak! is called, all tweak!s will be in original position.
-    fn parse_tweaks(file: &'static str) -> Option<()> {
+    fn parse_tweaks(file: &'static str, file_path: &PathBuf) -> Option<()> {
         let mut fileinfos = PARSED_FILES.lock().unwrap();
 
         if !fileinfos.contains(file) {
             fileinfos.insert(file);
             let mut values = VALUES.lock().unwrap();
 
-            let file_modified = last_modified(file).unwrap_or_else(SystemTime::now);
+            let file_modified = last_modified(file_path).unwrap_or_else(SystemTime::now);
             let now = Instant::now();
 
             let mut tweaks_seen = 0;
-            for (line_n, line) in BufReader::new(File::open(file).ok()?)
+            for (line_n, line) in BufReader::new(File::open(CARGO_PROJECT_ROOT.join(file_path)).ok()?)
                 .lines()
                 .filter_map(|line| line.ok())
                 .enumerate()
@@ -147,13 +172,13 @@ mod itweak {
 
     fn update_tweak<T: 'static + Tweakable + Clone + Send>(
         tweak: &mut TweakValue,
-        file: &'static str,
+        file_path: &PathBuf,
     ) -> Option<()> {
         tweak.last_checked = Instant::now();
-        let last_modified = last_modified(file)?;
+        let last_modified = last_modified(file_path)?;
         if tweak.value.is_none() || last_modified != tweak.file_modified {
             let mut tweaks_seen = 0;
-            let line_str = BufReader::new(File::open(file).ok()?)
+            let line_str = BufReader::new(File::open(file_path).ok()?)
                 .lines()
                 .filter_map(|line| line.ok())
                 .find(|line| {
@@ -192,10 +217,11 @@ mod itweak {
         line: u32,
         column: u32,
     ) -> Option<T> {
-        parse_tweaks(file);
+        let file_path = CARGO_PROJECT_ROOT.join(file);
+        parse_tweaks(file, &file_path);
 
         let mut lock = VALUES.lock().unwrap();
-        let mut tweak = lock.get_mut(&(file, line, column))?;
+        let tweak = lock.get_mut(&(file, line, column))?;
 
         if !tweak.initialized {
             tweak.value = initial_value.map(|inner| Box::new(inner) as Box<dyn Any + Send>);
@@ -203,13 +229,15 @@ mod itweak {
         }
 
         if tweak.last_checked.elapsed().as_secs_f32() > 0.5 {
-            update_tweak::<T>(tweak, file)?;
+            update_tweak::<T>(tweak, &file_path)?;
         }
 
         tweak.value.as_ref()?.downcast_ref().cloned()
     }
 
     pub fn watch_modified(file: &'static str) -> bool {
+        let file_path = CARGO_PROJECT_ROOT.join(file);
+
         let mut lock = WATCHERS.lock().unwrap();
         let entry = lock.entry(file);
 
@@ -217,12 +245,12 @@ mod itweak {
 
         let watcher = entry.or_insert_with(|| FileWatcher {
             last_checked: now,
-            file_modified: last_modified(file).unwrap_or_else(SystemTime::now),
+            file_modified: last_modified(&file_path).unwrap_or_else(SystemTime::now),
         });
 
         watcher.last_checked = now;
 
-        let last_modified = last_modified(file).unwrap_or_else(SystemTime::now);
+        let last_modified = last_modified(&file_path).unwrap_or_else(SystemTime::now);
         last_modified
             .duration_since(watcher.file_modified)
             .map(|time| {
@@ -247,7 +275,7 @@ pub fn inline_tweak<T: 'static + Tweakable + Clone + Send>(
 #[macro_export]
 macro_rules! release_tweak {
     ($default:expr) => {
-        inline_tweak::inline_tweak(None, concat!(env!("CARGO_MANIFEST_DIR"), "/", file!()), line!(), column!()).unwrap_or_else(|| $default)
+        inline_tweak::inline_tweak(None, file!(), line!(), column!()).unwrap_or_else(|| $default)
     };
     ($value:literal; $default:expr) => {
         inline_tweak::inline_tweak(Some($value), file!(), line!(), column!())
@@ -259,7 +287,7 @@ macro_rules! release_tweak {
 #[macro_export]
 macro_rules! tweak {
     ($default:expr) => {
-        inline_tweak::inline_tweak(None, concat!(env!("CARGO_MANIFEST_DIR"), "/", file!()), line!(), column!()).unwrap_or_else(|| $default)
+        inline_tweak::inline_tweak(None, file!(), line!(), column!()).unwrap_or_else(|| $default)
     };
     ($value:literal; $default:expr) => {
         inline_tweak::inline_tweak(Some($value), file!(), line!(), column!())

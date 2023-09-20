@@ -6,11 +6,11 @@ version = 3
 name = "inline_tweak"
 version = "1.0.9"
 dependencies = [
- "lazy_static",
+ "once_cell",
 ]
 
 [[package]]
-name = "lazy_static"
-version = "1.4.0"
+name = "once_cell"
+version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
+checksum = "dd8b5dd2ae5ed71462c540258bedcb51965123ad7e7ccf4b9a8cafaa4a63576d"
