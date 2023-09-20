@@ -247,7 +247,7 @@ pub fn inline_tweak<T: 'static + Tweakable + Clone + Send>(
 #[macro_export]
 macro_rules! release_tweak {
     ($default:expr) => {
-        inline_tweak::inline_tweak(None, file!(), line!(), column!()).unwrap_or_else(|| $default)
+        inline_tweak::inline_tweak(None, concat!(env!("CARGO_MANIFEST_DIR"), "/", file!()), line!(), column!()).unwrap_or_else(|| $default)
     };
     ($value:literal; $default:expr) => {
         inline_tweak::inline_tweak(Some($value), file!(), line!(), column!())
@@ -259,7 +259,7 @@ macro_rules! release_tweak {
 #[macro_export]
 macro_rules! tweak {
     ($default:expr) => {
-        inline_tweak::inline_tweak(None, file!(), line!(), column!()).unwrap_or_else(|| $default)
+        inline_tweak::inline_tweak(None, concat!(env!("CARGO_MANIFEST_DIR"), "/", file!()), line!(), column!()).unwrap_or_else(|| $default)
     };
     ($value:literal; $default:expr) => {
         inline_tweak::inline_tweak(Some($value), file!(), line!(), column!())
